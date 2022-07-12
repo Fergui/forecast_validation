@@ -19,6 +19,8 @@ groups = {
 }
 
 obs2wrf = {
+    #'u10_wind': lambda d,t,h: getvar(d, 'uvmet10', timeidx=t)[0], 
+    #'v10_wind': lambda d,t,h: getvar(d, 'uvmet10', timeidx=t)[1], 
     'wind_speed': lambda d,t,h: getvar(d, 'wspd_wdir10', timeidx=t)[0], 
     'wind_direction': lambda d,t,h: getvar(d, 'wspd_wdir10', timeidx=t)[1], 
     'air_temp': lambda d,t,h: getvar(d, 'T2', timeidx=t) - 273.15,
@@ -60,35 +62,38 @@ def wrf_spatial_interp(wrf_files, obs):
         m = re.match(r'.*-([0-9]{4})-([0-9]{2})-([0-9]{2})_([0-9]{2}):([0-9]{2}):([0-9]{2})-*',file)
         if m is not None:
             fcstarttime = '{:04d}-{:02d}-{:02d}_{:02d}:{:02d}:{:02d}'.format(*[int(_) for _ in m.groups()])#converting strings into integers 
-            with nc.Dataset(file, 'r', format='NETCDF4') as ds:
-                ft_dt = datetime.strptime(fcstarttime,'%Y-%m-%d_%H:%M:%S')
-                xlat = ds.variables['XLAT'][0]
-                xlon = ds.variables['XLONG'][0]
-                minlon, maxlon, minlat, maxlat = xlon.min(), xlon.max(), xlat.min(), xlat.max()
-                mask = np.logical_and(stats.LONGITUDE  >= minlon, 
-                        np.logical_and(stats.LONGITUDE <= maxlon, 
-                            np.logical_and(stats.LATITUDE >= minlat, stats.LATITUDE <= maxlat)))
-                coords = stats[mask]
-                points = np.c_[xlon.ravel(), xlat.ravel()]
-                xi = np.c_[coords.LONGITUDE, coords.LATITUDE]
-                stid = coords.index
-                for t in range(len(ds['Times'])):
-                    wt_dt = wrf_time(ds, t)
-                    offset = abs(wt_dt-ft_dt).total_seconds()/3600.
-                    result['STID'].append(stid)
-                    result['LONGITUDE'].append(xi[:, 0])
-                    result['LATITUDE'].append(xi[:, 1])
-                    result['fc_time'].append([ft_dt]*len(xi))
-                    result['wrf_time'].append([wt_dt]*len(xi))
-                    result['offset'].append([offset]*len(xi))
-                    for var in obs.columns:
-                        if var in obs2wrf.keys():
-                            # get data
-                            values = np.ravel(obs2wrf[var](ds, t, h=None))
-                            # interpolate data
-                            yi = griddata(points, values, xi, method='linear')
-                            # concatenate data
-                            result['wrf_'+var].append(yi)
+            try:
+                with nc.Dataset(file, 'r', format='NETCDF4') as ds:
+                    ft_dt = datetime.strptime(fcstarttime,'%Y-%m-%d_%H:%M:%S')
+                    xlat = ds.variables['XLAT'][0]
+                    xlon = ds.variables['XLONG'][0]
+                    minlon, maxlon, minlat, maxlat = xlon.min(), xlon.max(), xlat.min(), xlat.max()
+                    mask = np.logical_and(stats.LONGITUDE  >= minlon, 
+                            np.logical_and(stats.LONGITUDE <= maxlon, 
+                                np.logical_and(stats.LATITUDE >= minlat, stats.LATITUDE <= maxlat)))
+                    coords = stats[mask]
+                    points = np.c_[xlon.ravel(), xlat.ravel()]
+                    xi = np.c_[coords.LONGITUDE, coords.LATITUDE]
+                    stid = coords.index
+                    for t in range(len(ds['Times'])):
+                        wt_dt = wrf_time(ds, t)
+                        offset = abs(wt_dt-ft_dt).total_seconds()/3600.
+                        result['STID'].append(stid)
+                        result['LONGITUDE'].append(xi[:, 0])
+                        result['LATITUDE'].append(xi[:, 1])
+                        result['fc_time'].append([ft_dt]*len(xi))
+                        result['wrf_time'].append([wt_dt]*len(xi))
+                        result['offset'].append([offset]*len(xi))
+                        for var in obs.columns:
+                            if var in obs2wrf.keys():
+                                # get data
+                                values = np.ravel(obs2wrf[var](ds, t, h=None))
+                                # interpolate data
+                                yi = griddata(points, values, xi, method='linear')
+                                # concatenate data
+                                result['wrf_'+var].append(yi)
+            except Exception as e:
+                logging.warning('wrf_spatial_interp - some issue processing file {}, more details below:\n{}'.format(file,e))
     for k,v in result.items():
         result[k] = np.concatenate(v)
     df = pd.DataFrame(result)
