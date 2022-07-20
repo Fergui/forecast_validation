@@ -19,14 +19,52 @@ groups = {
 }
 
 obs2wrf = {
-    #'u10_wind': lambda d,t,h: getvar(d, 'uvmet10', timeidx=t)[0], 
-    #'v10_wind': lambda d,t,h: getvar(d, 'uvmet10', timeidx=t)[1], 
     'wind_speed': lambda d,t,h: getvar(d, 'wspd_wdir10', timeidx=t)[0], 
     'wind_direction': lambda d,t,h: getvar(d, 'wspd_wdir10', timeidx=t)[1], 
     'air_temp': lambda d,t,h: getvar(d, 'T2', timeidx=t) - 273.15,
     'relative_humidity': lambda d,t,h: getvar(d, 'rh2', timeidx=t),
-    'PM_25_concentration': lambda d,t,h: d['tr17_1'][t][0]
+    'PM_25_concentration': lambda d,t,h: d['tr17_1'][t][0],
+    'plume_height': lambda d,t,h: plume_height(d,t)
 }
+
+external_vars = ['plume_height']
+
+def height8w(d,t):
+    """
+    Compute height at mesh bottom a.k.a. w-points 
+    :param d: open NetCDF4 dataset
+    :param t: number of timestep
+    """
+    ph = d.variables['PH'][t,:,:,:]  
+    phb = d.variables['PHB'][t,:,:,:]
+    return (phb + ph)/9.81 # geopotential height at W points
+
+def height8p(d,t):
+    """
+    Compute height of mesh centers (p-points)
+    :param d: open NetCDF4 dataset
+    :param t: number of timestep
+    """
+    z8w = height8w(d,t)
+    return 0.5*(z8w[0:z8w.shape[0]-1,:,:]+z8w[1:,:,:])
+
+def plume_height(d,t):
+    """
+    Compute plume height
+    :param d: open NetCDF4 dataset
+    :param t: number of timestep
+    """
+    smoke_threshold = 1
+    z =  height8p(d,t)
+    tr = d.variables['tr17_1'][t,:,:,:]
+    h = np.zeros(tr.shape[1:])
+    for i in range(0, tr.shape[2]):
+      for j in range(0, tr.shape[1]):
+          for k in range(tr.shape[0]-1, -1, -1):
+               if tr[k,j,i] > smoke_threshold:
+                    h[j,i] = z[k,j,i]
+                    break
+    return h
 
 def wrf_time(ds, tindx=0):
     str_time = ''.join([c.decode() for c in ds['Times'][tindx]])
@@ -47,7 +85,7 @@ def meso_opts(fc_paths):
         tm_end = wrf_time(ds, -1)
         bb = wrf_bbox(ds)
         bbox = (bb[0],bb[2],bb[1],bb[3])
-    vars = obs2wrf.keys()
+    vars = [v for v in obs2wrf.keys() if v not in external_vars]
     return tm_start, tm_end, bbox, vars
 
 def wrf_spatial_interp(wrf_files, obs):
