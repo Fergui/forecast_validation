@@ -19,8 +19,8 @@ groups = {
 }
 
 obs2wrf = {
-    'wind_speed': lambda d,t,h: getvar(d, 'wspd_wdir10', timeidx=t)[0], 
-    'wind_direction': lambda d,t,h: getvar(d, 'wspd_wdir10', timeidx=t)[1], 
+    'wind_speed': lambda d,t,h: wind_at_h(d,t,h)[0],
+    'wind_direction': lambda d,t,h: wind_at_h(d,t,h)[1], 
     'air_temp': lambda d,t,h: getvar(d, 'T2', timeidx=t) - 273.15,
     'relative_humidity': lambda d,t,h: getvar(d, 'rh2', timeidx=t),
     'PM_25_concentration': lambda d,t,h: d['tr17_1'][t][0],
@@ -65,6 +65,21 @@ def plume_height(d,t):
                     h[j,i] = z[k,j,i]
                     break
     return h
+
+def wind_at_h(ds,t,h):
+    """
+    Compute wind at a certain height
+    :param d: open NetCDF4 dataset
+    :param t: number of timestep
+    :param h: height in meters
+    """
+    wind_speed,wind_direction = getvar(ds,'wspd_wdir10',timeidx=t)
+    #z0 = ds.variables['Z0'][t] # WZ0 is in the fire mesh and Z0 is not in wrfout
+    #u10,v10 = getvar(ds,'uvmet10',timeidx=t)
+    #uh = u10*np.log(h/z0)/np.log(10/z0)
+    #vh = v10*np.log(h/z0)/np.log(10/z0)
+    #wind_speed = np.root(uh**2+vh**2)
+    return wind_speed,wind_direction
 
 def wrf_time(ds, tindx=0):
     str_time = ''.join([c.decode() for c in ds['Times'][tindx]])
