@@ -1,0 +1,15 @@
+{
+    "sims_path": "/path/to/all/sims",
+    "domain": 3,
+    "meso_vars": null,
+    "start_utc": null,
+    "end_utc": null,
+    "ir_path": "/path/to/ir/folder/with/kml/files",
+    "misr_path": "/path/to/misr/csv/file",
+    "obs_path": null,
+    "wrf_path": null,
+    "res_path": null,
+    "stats_path": null,
+    "plots_path": null,
+    "network_height_path": null
+}

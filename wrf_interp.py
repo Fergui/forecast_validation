@@ -1,3 +1,4 @@
+from perimeters import Perimeter
 from scipy.interpolate import griddata, interp1d
 from wrf import getvar
 import numpy as np
@@ -24,10 +25,12 @@ obs2wrf = {
     'air_temp': lambda d,t,h: getvar(d, 'T2', timeidx=t) - 273.15,
     'relative_humidity': lambda d,t,h: getvar(d, 'rh2', timeidx=t),
     'PM_25_concentration': lambda d,t,h: d['tr17_1'][t][0],
-    'plume_height': lambda d,t,h: plume_height(d,t)
+    'plume_height': lambda d,t,h: plume_height(d,t),
+    'fire_area': lambda d,t,h: None,
+    'fire_perim': lambda d,t,h: None
 }
 
-external_vars = ['plume_height']
+external_vars = ['plume_height', 'fire_area', 'fire_perim']
 
 def height8w(d,t):
     """
@@ -66,19 +69,21 @@ def plume_height(d,t):
                     break
     return h
 
-def wind_at_h(ds,t,h):
+def wind_at_h(ds, t, h):
     """
     Compute wind at a certain height
     :param d: open NetCDF4 dataset
     :param t: number of timestep
     :param h: height in meters
     """
-    wind_speed,wind_direction = getvar(ds,'wspd_wdir10',timeidx=t)
-    #z0 = ds.variables['Z0'][t] # WZ0 is in the fire mesh and Z0 is not in wrfout
-    #u10,v10 = getvar(ds,'uvmet10',timeidx=t)
-    #uh = u10*np.log(h/z0)/np.log(10/z0)
-    #vh = v10*np.log(h/z0)/np.log(10/z0)
-    #wind_speed = np.root(uh**2+vh**2)
+    #wind_speed,wind_direction = getvar(ds,'wspd_wdir10',timeidx=t) # old version of wind
+    k = 0.41 # Karman's constant
+    u10,v10 = getvar(ds,'uvmet10',timeidx=t)
+    ust = getvar(ds,'UST',timeidx=t)
+    uh = u10 + ust/k*np.log(10/h)
+    vh = v10 + ust/k*np.log(10/h)
+    wind_speed = np.sqrt(uh**2+vh**2)
+    wind_direction = 270 - np.arctan2(vh,uh)*180/np.pi
     return wind_speed,wind_direction
 
 def wrf_time(ds, tindx=0):
@@ -106,7 +111,22 @@ def meso_opts(fc_paths):
 def wrf_spatial_interp(wrf_files, obs):
     logging.info('wrf_spatial_interp - starting spatial interpolation')
     obs['date_time'] = pd.to_datetime(obs['date_time'])
-    stats = obs.groupby('STID').first()[['LONGITUDE','LATITUDE']] 
+    # set default wind height
+    default_wind_height = 10
+    if 'default_wind_speed_height' not in obs.keys():
+        # if variable default_wind_speed_height doesn't exists, created with values default_wind_height
+        obs['default_wind_speed_height'] = default_wind_height
+    else:
+        # else, missing values in default_wind_speed_height, give a value of default_wind_height
+        obs.loc[obs['default_wind_speed_height'].isna(), 'default_wind_speed_height'] = default_wind_height
+    if 'wind_speed_height' not in obs.keys():
+        # if variable wind_speed_height doesn't exists, created with values from default_wind_speed_height
+        obs['wind_speed_height'] = obs['default_wind_speed_height']
+    else:
+        # else, missing values in wind_speed_height, give a value from default_wind_speed_height
+        if obs['wind_speed_height'].isna().sum():
+            obs.loc[obs['wind_speed_height'].isna(), 'wind_speed_height'] = obs['default_wind_speed_height'][obs['wind_speed_height'].isna()]
+    stats = obs.groupby(['STID','wind_speed_height']).first()[['LONGITUDE','LATITUDE']].reset_index('wind_speed_height')
     fields = ['STID', 'LATITUDE', 'LONGITUDE', 'fc_time', 'wrf_time', 'offset']
     fields += ['wrf_'+k for k in obs2wrf.keys()]
     result = {f:[] for f in fields}
@@ -114,7 +134,7 @@ def wrf_spatial_interp(wrf_files, obs):
         logging.debug('wrf_spatial_interp - spatial interpolation of WRF data from {}'.format(osp.basename(file)))
         m = re.match(r'.*-([0-9]{4})-([0-9]{2})-([0-9]{2})_([0-9]{2}):([0-9]{2}):([0-9]{2})-*',file)
         if m is not None:
-            fcstarttime = '{:04d}-{:02d}-{:02d}_{:02d}:{:02d}:{:02d}'.format(*[int(_) for _ in m.groups()])#converting strings into integers 
+            fcstarttime = '{:04d}-{:02d}-{:02d}_{:02d}:{:02d}:{:02d}'.format(*[int(_) for _ in m.groups()]) #converting strings into integers 
             try:
                 with nc.Dataset(file, 'r', format='NETCDF4') as ds:
                     ft_dt = datetime.strptime(fcstarttime,'%Y-%m-%d_%H:%M:%S')
@@ -125,11 +145,25 @@ def wrf_spatial_interp(wrf_files, obs):
                             np.logical_and(stats.LONGITUDE <= maxlon, 
                                 np.logical_and(stats.LATITUDE >= minlat, stats.LATITUDE <= maxlat)))
                     coords = stats[mask]
+                    pidx = np.where(coords.index == 'IR_DATA')[0]
                     points = np.c_[xlon.ravel(), xlat.ravel()]
                     xi = np.c_[coords.LONGITUDE, coords.LATITUDE]
                     stid = coords.index
                     for t in range(len(ds['Times'])):
                         wt_dt = wrf_time(ds, t)
+                        if len(pidx) == 1:
+                            logging.debug('wrf_spatial_interp - processing fire perimeters')
+                            fxlat = ds.variables['FXLAT'][...]
+                            fxlong = ds.variables['FXLONG'][...]
+                            fa = ds.variables['FIRE_AREA'][...]
+                            aff = 1.-fa
+                            array = np.concatenate((fxlong,fxlat,aff))
+                            p = Perimeter({'array': array, 'time': wt_dt})
+                            perim = [np.nan]*len(xi)
+                            perim[pidx[0]] = p
+                            area = [np.nan]*len(xi)
+                            area[pidx[0]] = p.area
+                        logging.debug('wrf_spatial_interp - processing weather data')
                         offset = abs(wt_dt-ft_dt).total_seconds()/3600.
                         result['STID'].append(stid)
                         result['LONGITUDE'].append(xi[:, 0])
@@ -139,12 +173,32 @@ def wrf_spatial_interp(wrf_files, obs):
                         result['offset'].append([offset]*len(xi))
                         for var in obs.columns:
                             if var in obs2wrf.keys():
-                                # get data
-                                values = np.ravel(obs2wrf[var](ds, t, h=None))
-                                # interpolate data
-                                yi = griddata(points, values, xi, method='linear')
-                                # concatenate data
-                                result['wrf_'+var].append(yi)
+                                if 'wind' in var:
+                                    data = pd.DataFrame(np.zeros(len(coords)), columns=[var])
+                                    # interpolate at each unique height
+                                    for h in coords.wind_speed_height.unique():
+                                        # get index where to interpolate to
+                                        idx = coords['wind_speed_height'] == h
+                                        # get data
+                                        values = np.ravel(obs2wrf[var](ds, t, h=h))
+                                        # interpolate data
+                                        yi = griddata(points, values, xi[idx], method='linear')
+                                        # set value for the right heights
+                                        data[var][idx.values] = yi
+                                    result['wrf_'+var].append(data[var].values)
+                                elif 'fire' not in var:
+                                    # get data
+                                    values = np.ravel(obs2wrf[var](ds, t, h=None))
+                                    # interpolate data
+                                    yi = griddata(points, values, xi, method='linear')
+                                    # concatenate data
+                                    result['wrf_'+var].append(yi)
+                                elif var == 'fire_area':
+                                    result['wrf_'+var].append(area)
+                                elif var == 'fire_perim':
+                                    result['wrf_'+var].append(perim)
+                                else:
+                                    logging.warning('wrf_spatial_interp - var {} not recognized'.format(var))
             except Exception as e:
                 logging.warning('wrf_spatial_interp - some issue processing file {}, more details below:\n{}'.format(file,e))
     for k,v in result.items():
@@ -157,20 +211,28 @@ def wrf_temporal_interp(wrf, obs):
     wrf['wrf_time'] = pd.to_datetime(wrf['wrf_time'])
     obs['date_time'] = pd.to_datetime(obs['date_time'])
     obs.sort_values(['STID', 'date_time'], inplace=True)
-    wrf.sort_values(['STID', 'wrf_time'], inplace=False)
+    wrf.sort_values(['STID', 'wrf_time'], inplace=True)
     df = [[] for _ in range(len(groups))]
     for g,((ioff,foff),label) in groups.items():
         logging.info('wrf_temporal_interp - starting temporal interpolation of group {}'.format(label))
-        for stid,data in wrf[wrf.offset.between(ioff,foff)].groupby('STID'):
+        for stid,data in wrf[wrf.offset.between(ioff,foff,inclusive='right')].groupby('STID'):
             logging.debug('wrf_temporal_interp - temporal interpolation of station {}'.format(stid))
             df_st = obs.set_index('STID').loc[[stid]].reset_index()
-            ti = data.wrf_time.to_numpy().astype('datetime64[m]').astype('float64')
-            t = df_st.date_time.to_numpy().astype('datetime64[m]').astype('float64')
+            twrf = data.wrf_time.to_numpy().astype('datetime64[m]').astype('float64')
+            tobs = df_st.date_time.to_numpy().astype('datetime64[m]').astype('float64')
             for var in obs2wrf.keys():
                 wrf_var = 'wrf_'+var
-                fi = data[wrf_var].to_numpy().astype('float64')
-                ft = interp1d(ti, fi, bounds_error=False)
-                df_st[wrf_var] = ft(t)
+                if var == 'fire_perim':
+                    fwrf = data[wrf_var].to_numpy()
+                    tindx = [np.argmin([abs(tw-to)/3600. for tw in twrf]) for to in tobs]
+                    fobs = fwrf[tindx]
+                    tmask = np.logical_or(tobs < twrf[0], tobs > twrf[1])
+                    fobs[tmask] = np.nan
+                else:
+                    fwrf = data[wrf_var].to_numpy().astype('float64')
+                    ft = interp1d(twrf, fwrf, bounds_error=False)
+                    fobs = ft(tobs)
+                df_st[wrf_var] = fobs
             df_st['offset'] = label
             df[g].append(df_st)
     df_g = []
